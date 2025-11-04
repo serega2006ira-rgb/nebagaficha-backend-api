@@ -1,0 +1,8 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  # Перенаправляет все запросы /api/auth/* в папку с функциями
+  from = "/api/auth/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
