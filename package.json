@@ -12,10 +12,11 @@
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.19.3",
     "passport": "^0.6.0",
     "passport-github2": "^0.1.12",
-    "portfinder": "^1.0.38",
-    "sqlite3": "^5.1.6"
+    "pg": "^8.16.3",
+    "portfinder": "^1.0.38"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
