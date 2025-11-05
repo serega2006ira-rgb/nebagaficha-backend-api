@@ -1,161 +1,172 @@
 // server.js
 
-const portfinder = require('portfinder');
-require('dotenv').config();
 const express = require('express');
+const session = require('express-session');
 const cors = require('cors');
+const mongoose = require('mongoose'); // Mongoose для MongoDB
 const passport = require('passport');
-const jwt = require('jsonwebtoken');
-const sqlite3 = require('sqlite3').verbose();
 const GitHubStrategy = require('passport-github2').Strategy;
+const jwt = require('jsonwebtoken');
+const dotenv = require('dotenv');
 
-// --- КОНСТАНТЫ ИЗ .ENV ---
-// Домены из вашего .env
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000'; 
-const BACKEND_CALLBACK_URL = process.env.BACKEND_CALLBACK_URL || 'http://localhost:5001/api/auth/github/callback'; 
-const JWT_SECRET = process.env.JWT_SECRET;
-const PORT = process.env.PORT || 5001; // Используем порт 5001
-
-if (!JWT_SECRET) {
-    console.error("FATAL ERROR: JWT_SECRET не определен! Аутентификация невозможна.");
-    // Принудительно завершаем процесс, если нет ключа
-    process.exit(1);
-}
+// Загрузка переменных окружения (для локального запуска)
+dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 5001;
+const FRONTEND_URL = process.env.FRONTEND_URL;
+const MONGODB_URI = process.env.MONGODB_URI;
+
+// --- 1. ПОДКЛЮЧЕНИЕ К MONGODB ---
+
+mongoose.connect(MONGODB_URI)
+    .then(() => console.log('✅ MongoDB успешно подключен'))
+    .catch(err => {
+        console.error('❌ Ошибка подключения к MongoDB:', err);
+        // ВАЖНО: При сбое подключения сервер должен упасть, чтобы Vercel показал ошибку
+        process.exit(1); 
+    });
 
 
-// =======================================================
-// 1. БАЗА ДАННЫХ И MIDDLEWARE
-// =======================================================
+// --- 2. МОДЕЛЬ ПОЛЬЗОВАТЕЛЯ (Mongoose Schema) ---
 
-// База данных SQLite 
-const db = new sqlite3.Database('./dev.db'); 
+const userSchema = new mongoose.Schema({
+    githubId: { type: String, unique: true, sparse: true },
+    googleId: { type: String, unique: true, sparse: true },
+    username: String,
+    displayName: String,
+    avatarUrl: String,
+    bio: String,
+    // Можете добавить другие поля
+});
 
-// Middleware
-app.use(express.json());
-
-// --- НАСТРОЙКА CORS ---
-// Разрешаем запросы с фронтенда Vercel и локальных хостов
-app.use(cors({ 
-    origin: [FRONTEND_URL, 'http://localhost:3000', 'http://localhost:5001'], 
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    credentials: true 
-}));
-
-app.use(passport.initialize());
+const User = mongoose.model('User', userSchema);
 
 
-// =======================================================
-// 2. СТРАТЕГИЯ GITHUB
-// =======================================================
+// --- 3. PASSPORT СТРАТЕГИИ И СЕРИАЛИЗАЦИЯ ---
 
+passport.serializeUser((user, done) => {
+    done(null, user.id);
+});
+
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await User.findById(id);
+        done(null, user);
+    } catch (err) {
+        done(err);
+    }
+});
+
+// GitHub Strategy
 passport.use(new GitHubStrategy({
     clientID: process.env.GITHUB_CLIENT_ID,
     clientSecret: process.env.GITHUB_CLIENT_SECRET,
-    // Используем переменную окружения
-    callbackURL: BACKEND_CALLBACK_URL 
-}, (accessToken, refreshToken, profile, done) => {
-    // --------------------------------------------------------------------------------
-    // ЛОГИКА СОХРАНЕНИЯ/ПОИСКА ПОЛЬЗОВАТЕЛЯ В SQLite
-    // --------------------------------------------------------------------------------
-    db.get('SELECT * FROM users WHERE github_id = ?', [profile.id], (err, user) => {
-        if (err) return done(err);
-        if (user) {
-            return done(null, user); 
-        } else {
-            // Если пользователь не найден, создаем нового
-            const newUser = { 
-                github_id: profile.id, 
-                username: profile.username 
-            };
-            // ВАЖНО: убедитесь, что в DB есть таблица users с полями github_id и username
-            db.run('INSERT INTO users (github_id, username) VALUES (?, ?)', 
-                   [newUser.github_id, newUser.username], function(err) {
-                if (err) return done(err);
-                // После вставки возвращаем нового пользователя
-                return done(null, newUser); 
+    callbackURL: `${process.env.BACKEND_URL}/api/auth/github/callback` // Используем Env Var
+},
+async (accessToken, refreshToken, profile, done) => {
+    try {
+        // Логика "upsert": найти или создать пользователя
+        let user = await User.findOne({ githubId: profile.id });
+
+        if (!user) {
+            user = new User({
+                githubId: profile.id,
+                username: profile.username,
+                displayName: profile.displayName || profile.username,
+                avatarUrl: profile.photos && profile.photos.length > 0 ? profile.photos[0].value : null,
+                bio: profile._json.bio || 'Без описания',
             });
+            await user.save();
         }
-    });
+        done(null, user);
+    } catch (err) {
+        done(err, null);
+    }
 }));
 
-// Сериализация/Десериализация (Обязательно для Passport.js)
-passport.serializeUser((user, done) => { done(null, user.id); });
-passport.deserializeUser((id, done) => { 
-    db.get('SELECT * FROM users WHERE id = ?', [id], (err, user) => {
-        done(err, user);
-    });
-});
+
+// --- 4. MIDDLEWARE ---
+
+// CORS для разрешения запросов с фронтенда
+app.use(cors({
+    origin: FRONTEND_URL, 
+    credentials: true,
+}));
+
+app.use(express.json());
+
+// Session Middleware (Passport требует сессию)
+app.use(session({
+    secret: process.env.JWT_SECRET, // Используем JWT_SECRET как секрет сессии
+    resave: false,
+    saveUninitialized: true,
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
 
 
-// =======================================================
-// 3. MIDDLEWARE ДЛЯ ВЕРИФИКАЦИИ JWT 
-// =======================================================
-const authenticateToken = (req, res, next) => {
-    // 1. Получаем токен из заголовка Authorization: Bearer <token>
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+// --- 5. ROUTES ---
 
-    if (token == null) return res.status(401).json({ error: 'Требуется JWT (401)' });
-
-    // 2. Верификация
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Токен недействителен или просрочен (403)' });
-        
-        // 3. Прикрепляем payload токена к запросу
-        req.user = user;
-        next(); 
-    });
-};
-
-
-// =======================================================
-// 4. РОУТЫ
-// =======================================================
-
-// Публичный роут
+// Главный маршрут для проверки живости
 app.get('/', (req, res) => {
-    res.send('Backend API is running.');
+    res.send(`Backend API is running. MONGODB_URI: ${!!MONGODB_URI ? 'SET' : 'NOT SET'}`);
 });
 
-// 1. Начало авторизации GitHub
-app.get('/api/auth/github', passport.authenticate('github', { scope: ['user:email'] }));
-
-// 2. Колбэк от GitHub
-app.get('/api/auth/github/callback',
-  // Если авторизация Passport не удалась, перенаправляем на фронтенд с ошибкой
-  passport.authenticate('github', { failureRedirect: `${FRONTEND_URL}/?error=auth_failed` }), 
-  (req, res) => {
-    const user = req.user;
-    // Генерируем токен, используя данные пользователя (из DB)
-    const token = jwt.sign({ id: user.id, username: user.username, provider: 'github' }, JWT_SECRET, { expiresIn: '1h' });
-    
-    // Перенаправляем на домен Vercel с токеном
-    res.redirect(`${FRONTEND_URL}/?token=${token}`);
-  }
+// GitHub Auth Routes
+app.get('/api/auth/github',
+    passport.authenticate('github', { scope: ['user:email'] })
 );
 
-// 3. Защищенный маршрут (Проверяет JWT от фронтенда)
-// Здесь применяется наш новый Middleware
-app.get('/api/protected/profile', authenticateToken, (req, res) => {
-    res.json({
-        message: 'Добро пожаловать в защищенную зону!',
-        user: req.user, // Данные, извлеченные из JWT
-        secretData: 'Верификация JWT прошла успешно!'
-    });
+app.get('/api/auth/github/callback',
+    passport.authenticate('github', { failureRedirect: FRONTEND_URL }),
+    (req, res) => {
+        // Генерируем JWT после успешного входа
+        const token = jwt.sign(
+            { id: req.user.id, username: req.user.username }, 
+            process.env.JWT_SECRET, 
+            { expiresIn: '1h' }
+        );
+        // Перенаправляем на фронтенд с токеном в URL
+        res.redirect(`${FRONTEND_URL}?token=${token}`);
+    }
+);
+
+// Маршрут для Google (если настроен)
+app.get('/api/auth/google', (req, res) => {
+    // ВАШ КОД Google Auth
+    res.status(501).send('Google Auth not implemented yet.');
 });
 
 
-// =======================================================
-// 5. ЗАПУСК СЕРВЕРА
-// =======================================================
+// Защищенный маршрут (проверка JWT)
+app.get('/api/protected/profile', (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authorization header missing or invalid' });
+    }
 
-// Используем portfinder для надежного запуска
-portfinder.getPort({ port: PORT }, (err, availablePort) => {
-  if (err) {
-    console.error("Не удалось найти доступный порт:", err);
-    return;
-  }
-  app.listen(availablePort, () => console.log(`🚀 Сервер запущен на http://localhost:${availablePort}`));
+    const token = authHeader.split(' ')[1];
+
+    try {
+        // Проверяем и декодируем токен
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
+        // В реальном приложении здесь был бы поиск пользователя по decoded.id
+        res.json({
+            secretData: "Access granted! JWT is valid.",
+            user: { id: decoded.id, username: decoded.username }
+        });
+    } catch (err) {
+        // Если токен не прошел верификацию
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+});
+
+
+// --- 6. START SERVER ---
+
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
