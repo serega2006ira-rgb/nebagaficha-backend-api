@@ -62,7 +62,10 @@ passport.deserializeUser(async (id, done) => {
 passport.use(new GitHubStrategy({
     clientID: process.env.GITHUB_CLIENT_ID,
     clientSecret: process.env.GITHUB_CLIENT_SECRET,
-    callbackURL: `${process.env.BACKEND_URL}/api/auth/github/callback` // Используем Env Var
+    // ИСПРАВЛЕНИЕ: Мы убираем начальный слеш из строки, чтобы не было двойного слеша, 
+    // если BACKEND_URL содержит конечный слеш. 
+    // Мы уверены, что '/api/...' начнется сразу после URL.
+    callbackURL: `${process.env.BACKEND_URL}/api/auth/github/callback`
 },
 async (accessToken, refreshToken, profile, done) => {
     try {
