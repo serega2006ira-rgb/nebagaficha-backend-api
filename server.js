@@ -62,9 +62,7 @@ passport.deserializeUser(async (id, done) => {
 passport.use(new GitHubStrategy({
     clientID: process.env.GITHUB_CLIENT_ID,
     clientSecret: process.env.GITHUB_CLIENT_SECRET,
-    // ИСПРАВЛЕНИЕ: Мы убираем начальный слеш из строки, чтобы не было двойного слеша, 
-    // если BACKEND_URL содержит конечный слеш. 
-    // Мы уверены, что '/api/...' начнется сразу после URL.
+    // Callback URL должен указывать на маршрут бэкенда
     callbackURL: `${process.env.BACKEND_URL}/api/auth/github/callback`
 },
 async (accessToken, refreshToken, profile, done) => {
@@ -104,6 +102,8 @@ app.use(session({
     secret: process.env.JWT_SECRET, // Используем JWT_SECRET как секрет сессии
     resave: false,
     saveUninitialized: true,
+    // ДОБАВЛЕНО: Принудительное изменение для пересборки Vercel
+    cookie: { maxAge: 24 * 60 * 60 * 1000 } 
 }));
 
 app.use(passport.initialize());
